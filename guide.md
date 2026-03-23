@@ -1,6 +1,6 @@
-# LLM Training Techniques: Complete Technical Guide
+# LLM Fine-Tuning & Alignment: Technical Guide
 
-This guide provides an in-depth walkthrough of three essential LLM training paradigms demonstrated in this repository: **Supervised Fine-Tuning (SFT)**, **Knowledge Distillation**, and **Reinforcement Learning from Human Feedback (RLHF) via Direct Preference Optimization (DPO)**.
+This guide provides an in-depth walkthrough of two essential LLM post-training techniques: **Supervised Fine-Tuning (SFT)** and **RLHF via Direct Preference Optimization (DPO)**.
 
 ---
 
@@ -9,35 +9,40 @@ This guide provides an in-depth walkthrough of three essential LLM training para
 1. [Introduction](#introduction)
 2. [Prerequisites](#prerequisites)
 3. [Part 1: Supervised Fine-Tuning (SFT)](#part-1-supervised-fine-tuning-sft)
-4. [Part 2: Knowledge Distillation](#part-2-knowledge-distillation)
-5. [Part 3: RLHF with Direct Preference Optimization (DPO)](#part-3-rlhf-with-direct-preference-optimization-dpo)
-6. [Published Models & Datasets](#published-models--datasets)
+4. [Part 2: RLHF with Direct Preference Optimization (DPO)](#part-2-rlhf-with-direct-preference-optimization-dpo)
+5. [How SFT and DPO Work Together](#how-sft-and-dpo-work-together)
+6. [Published Models](#published-models)
 7. [Key Libraries & Concepts](#key-libraries--concepts)
-8. [Recommended Learning Path](#recommended-learning-path)
 
 ---
 
 ## Introduction
 
-### What This Repository Teaches
+### The Post-Training Pipeline
 
-Modern LLM development involves more than just pre-training. To create useful, efficient, and aligned models, practitioners use three complementary techniques:
+Modern LLM assistants like ChatGPT aren't just pre-trained on text—they go through additional training stages:
 
-| Technique | Purpose | When to Use |
-|-----------|---------|-------------|
-| **Supervised Fine-Tuning (SFT)** | Teach models to follow instructions | When you have instruction-response pairs |
-| **Knowledge Distillation** | Compress large models into smaller ones | When you need efficiency for deployment |
-| **DPO (RLHF)** | Align outputs with human preferences | When quality ranking data is available |
+```
+Pre-training (next token prediction on web text)
+        │
+        ▼
+    [ SFT ]  →  Model learns to follow instructions
+        │
+        ▼
+    [ RLHF/DPO ]  →  Model outputs align with human preferences
+        │
+        ▼
+  Helpful, harmless assistant
+```
 
-This repository provides hands-on implementations of all three, complete with real datasets, training code, and evaluation.
+This repository demonstrates both stages with working code.
 
-### What You'll Learn
+### What Each Technique Does
 
-- How to fine-tune a 7B parameter model on a single GPU using QLoRA
-- How to distill knowledge from BERT to DistilBERT for 4x memory reduction
-- How to apply post-training quantization (FP16, INT4) with minimal accuracy loss
-- How to train preference-aligned models using DPO instead of PPO
-- Best practices for evaluation, including LLM-as-judge techniques
+| Technique | Input Data | What the Model Learns |
+|-----------|------------|----------------------|
+| **SFT** | (instruction, response) pairs | How to format helpful answers |
+| **DPO** | (prompt, good_response, bad_response) triples | Which responses humans prefer |
 
 ---
 
@@ -46,7 +51,6 @@ This repository provides hands-on implementations of all three, complete with re
 ### Hardware Requirements
 - **GPU**: NVIDIA GPU with 16GB+ VRAM (T4, V100, A100, or RTX 3090/4090)
 - **RAM**: 16GB+ system memory
-- **Storage**: 20GB+ for model checkpoints
 
 ### Software Requirements
 ```bash
@@ -55,11 +59,11 @@ PyTorch >= 2.0
 CUDA >= 11.8
 ```
 
-### Core Libraries
+### Installation
 ```bash
 pip install transformers>=4.57 datasets>=4.0 peft>=0.18 trl>=0.26
-pip install accelerate bitsandbytes evaluate scikit-learn
-pip install seaborn matplotlib tensorboard wandb
+pip install accelerate bitsandbytes evaluate
+pip install tensorboard wandb
 ```
 
 ---
@@ -70,18 +74,26 @@ pip install seaborn matplotlib tensorboard wandb
 
 ### What is SFT?
 
-Supervised Fine-Tuning adapts a pre-trained language model to follow instructions by training it on (instruction, response) pairs. The model learns to generate helpful, task-specific outputs instead of just predicting the next token.
+Supervised Fine-Tuning teaches a pre-trained LLM to follow instructions by training on (instruction, response) pairs. Before SFT, the model just predicts likely next tokens. After SFT, it generates helpful, structured responses.
+
+**Example training pair:**
+```
+Instruction: "Explain quantum computing in simple terms"
+Response: "Quantum computing uses quantum bits (qubits) that can be 0, 1,
+          or both at once. This lets quantum computers solve certain
+          problems much faster than regular computers..."
+```
 
 ### The QLoRA Approach
 
-This notebook uses **QLoRA** (Quantized Low-Rank Adaptation), which combines:
+Training a 7B model normally requires ~28GB VRAM. **QLoRA** makes it possible on a single 16GB GPU by combining:
 
-1. **4-bit Quantization**: Compress the base model from FP16 to NF4 format, reducing memory by 4x
-2. **LoRA Adapters**: Train small adapter matrices instead of all 7B parameters
+1. **4-bit Quantization**: Compress base model weights from FP16 to NF4
+2. **LoRA Adapters**: Train small matrices instead of all parameters
 
 ```
-Memory without QLoRA: ~28GB (FP16)
-Memory with QLoRA:    ~7GB  (4-bit + adapters)
+Standard fine-tuning:  ~28GB VRAM, 7B trainable params
+QLoRA fine-tuning:     ~7GB VRAM,  40M trainable params (0.59%)
 ```
 
 ### Model & Dataset
@@ -89,55 +101,75 @@ Memory with QLoRA:    ~7GB  (4-bit + adapters)
 | Component | Details |
 |-----------|---------|
 | Base Model | `meta-llama/Llama-2-7b-chat-hf` (7B parameters) |
-| Dataset | `saketgarodia1/guanaco-llama2-chat-en` (3,539 training examples) |
+| Dataset | `saketgarodia1/guanaco-llama2-chat-en` |
+| Training Examples | 3,539 |
+| Test Examples | 190 |
 | Format | Chat-style instruction-response pairs |
 
 ### Key Configuration
 
-#### BitsAndBytes Quantization Config
+#### 4-bit Quantization Config
 ```python
+from transformers import BitsAndBytesConfig
+
 bnb_config = BitsAndBytesConfig(
-    load_in_4bit=True,
-    bnb_4bit_quant_type="nf4",          # NormalFloat4 - optimal for transformers
-    bnb_4bit_compute_dtype=torch.bfloat16,
-    bnb_4bit_use_double_quant=True,     # Quantize the quantization constants
+    load_in_4bit=True,                    # Use 4-bit weights
+    bnb_4bit_quant_type="nf4",            # NormalFloat4 - best for transformers
+    bnb_4bit_compute_dtype=torch.bfloat16, # Compute in bf16
+    bnb_4bit_use_double_quant=True,       # Quantize the quantization scales too
 )
 ```
 
+**Why NF4?** NormalFloat4 places quantization buckets according to the normal distribution of transformer weights, giving lower error than uniform 4-bit quantization.
+
 #### LoRA Configuration
 ```python
+from peft import LoraConfig
+
 lora_config = LoraConfig(
-    r=16,                    # Rank of adapter matrices
-    lora_alpha=32,           # Scaling factor
-    lora_dropout=0.05,
+    r=16,                    # Rank of adapter matrices (higher = more capacity)
+    lora_alpha=32,           # Scaling factor (alpha/r determines learning rate scaling)
+    lora_dropout=0.05,       # Dropout for regularization
     target_modules=[         # Which layers to adapt
-        "q_proj", "k_proj", "v_proj", "o_proj",
-        "gate_proj", "up_proj", "down_proj"
+        "q_proj", "k_proj", "v_proj", "o_proj",  # Attention
+        "gate_proj", "up_proj", "down_proj"       # FFN
     ],
     bias="none",
     task_type="CAUSAL_LM",
 )
 ```
 
-**Trainable Parameters**: ~40M (0.59% of 6.8B total)
+**Why these target modules?** Attention projections (q, k, v, o) control how the model attends to context. FFN projections (gate, up, down) control knowledge retrieval. Adapting both gives the best results.
 
-#### Training Arguments
+#### Training Configuration
 ```python
-SFTConfig(
+from trl import SFTConfig
+
+training_args = SFTConfig(
     num_train_epochs=1,
     per_device_train_batch_size=1,
     gradient_accumulation_steps=8,      # Effective batch size = 8
     learning_rate=2e-4,
-    lr_scheduler_type="cosine",
-    warmup_ratio=0.03,
+    lr_scheduler_type="cosine",         # Smooth decay
+    warmup_ratio=0.03,                  # 3% warmup steps
     max_seq_length=1024,
-    optim="paged_adamw_32bit",
-    bf16=True,
-    gradient_checkpointing=True,
+    optim="paged_adamw_32bit",          # Memory-efficient optimizer
+    bf16=True,                          # Mixed precision
+    gradient_checkpointing=True,        # Trade compute for memory
+    eval_strategy="steps",
+    eval_steps=50,
+    save_strategy="steps",
+    save_steps=50,
+    load_best_model_at_end=True,
 )
 ```
 
-### Results
+**Key hyperparameters explained:**
+- `gradient_accumulation_steps=8`: With batch_size=1, this gives effective batch of 8
+- `gradient_checkpointing=True`: Recomputes activations during backward pass to save memory
+- `paged_adamw_32bit`: Offloads optimizer states to CPU when GPU memory is tight
+
+### Training Results
 
 | Metric | Before Training | After Training | Improvement |
 |--------|-----------------|----------------|-------------|
@@ -146,301 +178,129 @@ SFTConfig(
 
 ### Evaluation with GPT-4 as Judge
 
-The notebook includes LLM-as-judge evaluation using GPT-4:
+The notebook includes LLM-as-judge evaluation—using GPT-4 to score model outputs:
 
 ```python
 # Evaluation criteria:
-# - Correctness: Is the answer factually accurate?
-# - Helpfulness: Does it address the user's needs?
-# - Clarity: Is the response well-structured?
-# - Instruction Adherence: Does it follow the prompt?
-# - Politeness: Is the tone appropriate?
+rubric = """
+Rate the response on:
+1. Correctness (0-10): Is it factually accurate?
+2. Helpfulness (0-10): Does it address the user's needs?
+3. Clarity (0-10): Is it well-structured and easy to understand?
+4. Instruction Adherence (0-10): Does it follow the prompt?
+5. Politeness (0-10): Is the tone appropriate?
+"""
 ```
 
-This approach evaluates 50 test examples and tracks:
+The evaluation tracks:
+- Average scores across 50 test examples
 - Hallucination rate
 - Format violations
 - Safety concerns
 
 ### Output Artifacts
 
-- **LoRA Adapter**: Saved to Google Drive and pushed to HuggingFace
+- **LoRA Adapter saved to**: Google Drive + HuggingFace Hub
 - **Model ID**: `saketgarodia1/llama2-7b-guanaco-qlora-adapter`
+- **Checkpoint**: checkpoint-400
 
 ---
 
-## Part 2: Knowledge Distillation
-
-Knowledge distillation transfers knowledge from a large "teacher" model to a smaller "student" model, achieving similar performance with significantly reduced compute requirements.
-
-### Notebook Progression
-
-| Notebook | Purpose | Output |
-|----------|---------|--------|
-| `Distillation_part_1.ipynb` | Dataset preparation | Stratified IT ticket dataset |
-| `Distillation_part_2.ipynb` | Teacher model training | BERT classifier (88% acc) |
-| `Distillation_part_2_train_pooler_only.ipynb` | Alternative: freeze encoder | Pooler-only training |
-| `Distilliation_Part_IV.ipynb` | Quantization comparison | FP32 vs FP16 vs INT4 |
-
----
-
-### Part 2A: Dataset Preparation
-
-**Notebook**: `Distillation_part_1.ipynb`
-
-#### Dataset Overview
-
-| Property | Value |
-|----------|-------|
-| Source | IT Service Tickets |
-| Total Samples | 47,837 |
-| Classes | 8 categories |
-| Task | Multi-class text classification |
-
-#### Class Distribution
-
-| Class | Count | Percentage |
-|-------|-------|------------|
-| Hardware | 13,617 | 28.4% |
-| HR Support | 10,915 | 22.8% |
-| Access | 7,125 | 14.9% |
-| Miscellaneous | 7,060 | 14.7% |
-| Storage | 2,777 | 5.8% |
-| Purchase | 2,464 | 5.1% |
-| Internal Project | 2,119 | 4.4% |
-| Administrative rights | 1,760 | 3.7% |
-
-#### Stratified Splitting
-
-```python
-from sklearn.model_selection import train_test_split
-
-# Stratified split preserves class proportions across splits
-train, temp = train_test_split(df, test_size=0.3, stratify=df['Topic_group'])
-val, test = train_test_split(temp, test_size=0.5, stratify=temp['Topic_group'])
-
-# Result: Train (70%), Validation (15%), Test (15%)
-```
-
-**Output**: Dataset published to `saketgarodia1/IT-service-topic-classification-data`
-
----
-
-### Part 2B: Teacher Model Training
-
-**Notebook**: `Distillation_part_2.ipynb`
-
-#### Model Architecture
-
-```
-BertForSequenceClassification
-├── BertModel (109.5M params)
-│   ├── Embeddings: word + position + token_type
-│   ├── Encoder: 12 transformer layers
-│   └── Pooler: [CLS] token projection
-└── Classifier: Linear(768 → 8)
-```
-
-#### Training Configuration
-
-```python
-TrainingArguments(
-    num_train_epochs=3,
-    per_device_train_batch_size=16,
-    per_device_eval_batch_size=32,
-    learning_rate=2e-5,
-    lr_scheduler_type="linear",
-    weight_decay=0.01,
-    eval_strategy="epoch",
-    save_strategy="epoch",
-    load_best_model_at_end=True,
-    metric_for_best_model="f1_macro",
-)
-```
-
-#### Dynamic Padding
-
-```python
-# Instead of padding all sequences to max_length during preprocessing:
-tokenizer(text, truncation=True, padding=False, max_length=256)
-
-# Pad dynamically per-batch using DataCollatorWithPadding:
-collator = DataCollatorWithPadding(tokenizer)
-```
-
-This approach is more memory-efficient as shorter batches use less memory.
-
-#### Results
-
-| Metric | Pre-Training | Post-Training |
-|--------|--------------|---------------|
-| Accuracy | 0.160 | 0.882 |
-| F1 Macro | 0.072 | 0.879 |
-| Eval Loss | - | 0.418 |
-
-#### Per-Class Analysis
-
-**Strongest Classes** (by recall):
-- Hardware: 88%
-- HR Support: 88%
-- Access: 91%
-
-**Strongest Classes** (by precision):
-- Purchase: 95%
-- Storage: 94%
-
-**Output**: Model published to `saketgarodia1/bert-IT-ticket-classifier`
-
----
-
-### Part 2C: Pooler-Only Training (Alternative Approach)
-
-**Notebook**: `Distillation_part_2_train_pooler_only.ipynb`
-
-This notebook demonstrates training only the classification head while keeping the BERT encoder frozen:
-
-```python
-# Freeze all BERT encoder layers
-for name, param in model.bert.named_parameters():
-    param.requires_grad = False
-
-# Unfreeze pooler layer
-for name, param in model.bert.named_parameters():
-    if "pooler" in name:
-        param.requires_grad = True
-
-# Classifier is always trainable
-for name, param in model.named_parameters():
-    if "classifier" in name:
-        param.requires_grad = True
-```
-
-**Trainable parameters**: ~590K (vs 109M for full fine-tuning)
-
-This approach:
-- Trains ~200x faster
-- Uses less memory
-- Works well when pre-trained representations are already strong
-- Achieves ~52% accuracy (vs 88% for full fine-tuning) - demonstrating the value of full fine-tuning
-
----
-
-### Part 2D: Post-Training Quantization
-
-**Notebook**: `Distilliation_Part_IV.ipynb`
-
-This notebook compares inference performance across different precision formats:
-
-#### Quantization Comparison
-
-| Format | Memory | Val Accuracy | Val F1 | Test Accuracy | Test F1 |
-|--------|--------|--------------|--------|---------------|---------|
-| FP32 | 255 MB | 0.8852 | 0.8848 | 0.8786 | 0.8755 |
-| FP16 | 128 MB | 0.8852 | 0.8848 | 0.8785 | 0.8754 |
-| INT4 (NF4) | 66 MB | 0.8843 | 0.8824 | 0.8799 | 0.8755 |
-
-**Key Insight**: 4x memory reduction with <0.1% accuracy loss using NF4 quantization.
-
-#### Why Some Parameters Stay in FP16
-
-The notebook explains why embeddings, biases, and LayerNorm parameters are NOT quantized:
-
-**Embeddings** (23.4M params):
-- Represent semantic meaning of tokens
-- Quantization destroys synonym relationships and semantic topology
-- Causes 20-40% accuracy loss if quantized
-
-**Biases** (768 params per layer):
-- Control activation offsets
-- Tiny memory footprint
-- High sensitivity to rounding errors
-
-**LayerNorm gamma/beta**:
-- Critical for training stability
-- Small errors compound across layers
-- Cause gradient instability if quantized
-
-#### 4-bit Configuration
-
-```python
-nf4_config = BitsAndBytesConfig(
-    load_in_4bit=True,
-    bnb_4bit_quant_type="nf4",        # NormalFloat4
-    bnb_4bit_compute_dtype=torch.bfloat16,
-    bnb_4bit_use_double_quant=True,   # Double quantization for scales
-)
-
-model = AutoModelForSequenceClassification.from_pretrained(
-    model_id,
-    quantization_config=nf4_config,
-    device_map="auto",
-)
-```
-
-**Output**: Model published to `saketgarodia1/distilbert-IT-ticket-student-4bit`
-
----
-
-## Part 3: RLHF with Direct Preference Optimization (DPO)
+## Part 2: RLHF with Direct Preference Optimization (DPO)
 
 **Notebook**: `RLHF_with_DPO.ipynb`
 
 ### What is DPO?
 
-Direct Preference Optimization is an alternative to traditional RLHF that:
+Direct Preference Optimization aligns model outputs with human preferences **without training a separate reward model**. Traditional RLHF requires:
 
-| Traditional RLHF (PPO) | DPO |
-|------------------------|-----|
-| Train reward model separately | No reward model needed |
-| Complex RL optimization | Simple supervised loss |
-| Unstable training | Stable, predictable |
-| High compute requirements | Lower compute |
+1. Train a reward model on preference data
+2. Use RL (PPO) to optimize the LLM against the reward model
 
-DPO directly optimizes the policy to prefer "chosen" responses over "rejected" ones using a closed-form loss function.
+DPO simplifies this to a single supervised training step.
+
+### DPO vs Traditional RLHF
+
+| Aspect | Traditional RLHF (PPO) | DPO |
+|--------|------------------------|-----|
+| Reward Model | Required (separate training) | Not needed |
+| Training Stability | Can be unstable | Stable |
+| Hyperparameter Sensitivity | High | Low |
+| Implementation Complexity | Complex | Simple |
+| Compute Requirements | High | Lower |
+
+### How DPO Works
+
+Given a prompt and two responses (chosen and rejected), DPO directly optimizes:
+
+```
+Loss = -log(σ(β * (log π(chosen) - log π(rejected) - log π_ref(chosen) + log π_ref(rejected))))
+```
+
+In plain English: **Make the model more likely to generate "chosen" responses and less likely to generate "rejected" responses**, while staying close to the original model.
 
 ### Model & Dataset
 
 | Component | Details |
 |-----------|---------|
 | Base Model | `teknium/OpenHermes-2.5-Mistral-7B` |
-| Dataset | `Intel/orca_dpo_pairs` (12,859 preference pairs) |
+| Dataset | `Intel/orca_dpo_pairs` |
+| Training Examples | 12,859 preference pairs |
 | Format | {system, question, chosen, rejected} |
 
-### Preference Pair Format
+### Preference Pair Example
 
 ```json
 {
   "system": "You are a helpful AI assistant.",
-  "question": "What is the capital of France?",
-  "chosen": "The capital of France is Paris, which is located in the north-central part of the country.",
-  "rejected": "France's capital is Paris I think, or maybe Lyon?"
+  "question": "What causes rain?",
+  "chosen": "Rain forms when water vapor in the atmosphere condenses into
+             droplets. This happens when moist air rises, cools, and can
+             no longer hold all its moisture. The droplets combine and
+             fall as precipitation when they become heavy enough.",
+  "rejected": "Rain is water falling from clouds. It happens because of
+              weather and stuff. Clouds get heavy and rain falls down."
 }
 ```
 
-The model learns to generate responses more like "chosen" and less like "rejected".
+The model learns that detailed, accurate responses are preferred over vague ones.
 
 ### ChatML Format
+
+The notebook converts data to ChatML format for Mistral:
 
 ```
 <|im_start|>system
 You are a helpful AI assistant.<|im_end|>
 <|im_start|>user
-What is the capital of France?<|im_end|>
+What causes rain?<|im_end|>
 <|im_start|>assistant
-The capital of France is Paris...<|im_end|>
+Rain forms when water vapor...<|im_end|>
+```
+
+```python
+def format_chat(example):
+    messages = [
+        {"role": "system", "content": example["system"]},
+        {"role": "user", "content": example["question"]},
+        {"role": "assistant", "content": example["chosen"]}  # or rejected
+    ]
+    return tokenizer.apply_chat_template(messages, tokenize=False)
 ```
 
 ### DPO Configuration
 
 ```python
-DPOConfig(
+from trl import DPOConfig
+
+dpo_config = DPOConfig(
     per_device_train_batch_size=4,
-    gradient_accumulation_steps=4,
+    gradient_accumulation_steps=4,      # Effective batch = 16
     learning_rate=5e-5,
     lr_scheduler_type="cosine",
     max_steps=200,
     warmup_steps=50,
-    beta=0.1,                    # DPO temperature parameter
+    beta=0.1,                           # DPO temperature
     max_prompt_length=1024,
     max_length=1536,
     bf16=True,
@@ -450,17 +310,43 @@ DPOConfig(
 
 ### The Beta Parameter
 
-`beta` controls how strongly the model should deviate from the reference policy:
+`beta` controls how much the model can deviate from the reference (base) model:
 
-- **Low beta (0.1)**: Allows more deviation, stronger preference learning
-- **High beta (0.5+)**: Keeps outputs closer to base model
+| Beta Value | Effect |
+|------------|--------|
+| Low (0.1) | More deviation allowed, stronger preference learning |
+| Medium (0.2-0.3) | Balanced |
+| High (0.5+) | Stays closer to base model, conservative updates |
 
-### Training Process
+Lower beta = more aggressive preference optimization, but risk of "reward hacking"
+Higher beta = safer but slower learning
+
+### LoRA for DPO
+
+Same LoRA approach as SFT:
 
 ```python
+lora_config = LoraConfig(
+    r=16,
+    lora_alpha=16,
+    lora_dropout=0.05,
+    target_modules=[
+        "q_proj", "k_proj", "v_proj", "o_proj",
+        "gate_proj", "up_proj", "down_proj"
+    ],
+    bias="none",
+    task_type="CAUSAL_LM",
+)
+```
+
+### Training
+
+```python
+from trl import DPOTrainer
+
 trainer = DPOTrainer(
     model=model,
-    ref_model=None,           # Uses implicit reference
+    ref_model=None,           # DPOTrainer handles reference model internally
     args=dpo_config,
     train_dataset=dataset,
     tokenizer=tokenizer,
@@ -468,114 +354,122 @@ trainer = DPOTrainer(
 )
 
 trainer.train()
-# Final training loss: 0.040
 ```
 
-### Output
+**Final training loss**: 0.040
 
-- LoRA adapter merged with base model
-- Published to: `saketgarodia1/OpenHermes-2.5-Mistral-7B-DPO`
+### Inference Example
+
+```python
+from transformers import pipeline
+
+pipe = pipeline("text-generation", model=merged_model, tokenizer=tokenizer)
+
+messages = [
+    {"role": "system", "content": "You are a helpful assistant."},
+    {"role": "user", "content": "Explain black holes simply."}
+]
+
+prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+output = pipe(prompt, max_new_tokens=200, temperature=0.7, top_p=0.9)
+```
+
+### Output Artifacts
+
+- **LoRA Adapter**: `final_dpo_adapter/`
+- **Merged Model**: `saketgarodia1/OpenHermes-2.5-Mistral-7B-DPO`
 
 ---
 
-## Published Models & Datasets
+## How SFT and DPO Work Together
 
-### Models on HuggingFace
+In practice, these techniques are used in sequence:
 
-| Model | Type | Base | Task |
-|-------|------|------|------|
-| [llama2-7b-guanaco-qlora-adapter](https://huggingface.co/saketgarodia1/llama2-7b-guanaco-qlora-adapter) | LoRA Adapter | Llama-2-7B | Instruction Following |
-| [bert-IT-ticket-classifier](https://huggingface.co/saketgarodia1/bert-IT-ticket-classifier) | Full Model | BERT-base | IT Ticket Classification |
-| [bert-it-ticket-student](https://huggingface.co/saketgarodia1/bert-it-ticket-student) | Distilled | DistilBERT | IT Ticket Classification |
-| [distilbert-IT-ticket-student-4bit](https://huggingface.co/saketgarodia1/distilbert-IT-ticket-student-4bit) | Quantized | DistilBERT | IT Ticket Classification |
-| [OpenHermes-2.5-Mistral-7B-DPO](https://huggingface.co/saketgarodia1/OpenHermes-2.5-Mistral-7B-DPO) | DPO-tuned | Mistral-7B | Chat/Instruction |
+### Stage 1: SFT
+- **Input**: Pre-trained base model + instruction dataset
+- **Output**: Model that can follow instructions
+- **What it learns**: Format, structure, helpfulness
 
-### Datasets on HuggingFace
+### Stage 2: DPO
+- **Input**: SFT model + preference dataset
+- **Output**: Model aligned with human preferences
+- **What it learns**: Quality, safety, style preferences
 
-| Dataset | Size | Task |
-|---------|------|------|
-| [IT-service-topic-classification-data](https://huggingface.co/datasets/saketgarodia1/IT-service-topic-classification-data) | 47.8k | Text Classification |
-| [guanaco-llama2-chat-en](https://huggingface.co/datasets/saketgarodia1/guanaco-llama2-chat-en) | 3.7k | Instruction Tuning |
+### Why Both?
+
+| If you only do... | Problem |
+|-------------------|---------|
+| SFT only | Model follows instructions but may give verbose, unhelpful, or unsafe responses |
+| DPO only | Model has preferences but doesn't know how to structure responses |
+| SFT → DPO | Model follows instructions AND outputs align with preferences |
+
+### Real-World Pipeline (e.g., ChatGPT)
+
+```
+GPT-4 Base (pre-trained)
+    │
+    ▼
+SFT on instruction data (100k+ examples)
+    │
+    ▼
+RLHF/DPO on preference data (human rankings)
+    │
+    ▼
+Safety fine-tuning (red-teaming data)
+    │
+    ▼
+ChatGPT
+```
+
+---
+
+## Published Models
+
+| Model | Technique | Base | Link |
+|-------|-----------|------|------|
+| Llama-2 QLoRA Adapter | SFT | Llama-2-7B-Chat | [HuggingFace](https://huggingface.co/saketgarodia1/llama2-7b-guanaco-qlora-adapter) |
+| Mistral DPO | DPO | OpenHermes-2.5-Mistral-7B | [HuggingFace](https://huggingface.co/saketgarodia1/OpenHermes-2.5-Mistral-7B-DPO) |
 
 ---
 
 ## Key Libraries & Concepts
 
-### Core Libraries
+### Libraries
 
-| Library | Purpose | Key Features |
-|---------|---------|--------------|
-| `transformers` | Model loading, training | AutoModel, Trainer, Pipeline |
-| `peft` | Parameter-efficient fine-tuning | LoRA, QLoRA, AdaLoRA |
-| `trl` | RL-based training | SFTTrainer, DPOTrainer |
-| `bitsandbytes` | Quantization | 4-bit NF4, 8-bit INT8 |
-| `accelerate` | Distributed training | Multi-GPU, mixed precision |
-| `datasets` | Data loading | HuggingFace Hub integration |
+| Library | Purpose |
+|---------|---------|
+| `transformers` | Model loading, tokenization, training |
+| `peft` | LoRA, QLoRA adapters |
+| `trl` | SFTTrainer, DPOTrainer |
+| `bitsandbytes` | 4-bit/8-bit quantization |
+| `accelerate` | Multi-GPU, mixed precision |
 
-### Important Concepts
+### Key Concepts
+
+#### QLoRA
+Quantized Low-Rank Adaptation. Keeps base model in 4-bit, trains small FP16 adapter matrices.
 
 #### Gradient Checkpointing
-Trades compute for memory by recomputing activations during backward pass instead of storing them:
-```python
-model.gradient_checkpointing_enable()
-```
+Recomputes activations during backward pass instead of storing them. Saves ~50% memory at ~20% speed cost.
 
 #### Gradient Accumulation
-Simulates larger batch sizes on limited hardware:
-```python
-# Effective batch = per_device_batch * accumulation_steps
-# 1 * 8 = 8
-```
+Simulates larger batch sizes: `effective_batch = per_device_batch × accumulation_steps`
 
-#### Dynamic Padding
-Pads sequences to the longest in each batch, not globally:
-```python
-DataCollatorWithPadding(tokenizer)
-```
+#### ChatML
+Chat Markup Language. Standard format for instruction models using special tokens like `<|im_start|>` and `<|im_end|>`.
 
-#### Mixed Precision Training
-Uses FP16/BF16 for forward pass, FP32 for gradients:
-```python
-TrainingArguments(bf16=True)
-```
-
----
-
-## Recommended Learning Path
-
-### Beginner Path
-1. **Start with Distillation Part 1** - Understand data preparation
-2. **Then Distillation Part 2** - Learn full fine-tuning basics
-3. **Then Part IV** - Understand quantization
-
-### Intermediate Path
-4. **SFT Notebook** - Learn QLoRA and instruction tuning
-5. **Pooler-only training** - Understand transfer learning tradeoffs
-
-### Advanced Path
-6. **DPO Notebook** - Master preference-based alignment
-7. **Experiment** - Combine techniques (e.g., SFT then DPO)
+#### Reference Model (in DPO)
+The original model before DPO training. DPO loss includes a KL penalty to prevent the model from deviating too far from this reference.
 
 ---
 
 ## Conclusion
 
-This repository demonstrates the complete modern LLM training stack:
+This repository demonstrates the two key post-training stages for building LLM assistants:
 
-1. **SFT** teaches models to follow instructions
-2. **Distillation** makes models deployable
-3. **DPO** aligns models with human preferences
+1. **SFT** teaches the model to follow instructions using QLoRA for efficiency
+2. **DPO** aligns outputs with human preferences without complex RL
 
-Each technique serves a specific purpose, and they're often used in combination:
-
-```
-Pre-trained LLM
-     ↓
-  [SFT] → Instruction-following model
-     ↓
-  [DPO] → Preference-aligned model
-     ↓
-[Distillation + Quantization] → Deployable model
-```
+Together, they transform a raw pre-trained model into a helpful, aligned assistant.
 
 Happy training!
